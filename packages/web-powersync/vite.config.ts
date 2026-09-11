@@ -33,7 +33,11 @@ export default defineConfig({
     port: 5175,
     proxy: {
       '/api': {
-        target: process.env.VITE_API_URL ?? 'http://localhost:3000',
+        // Routed through the fault-injection proxy (packages/proxy), which
+        // forwards to the API and can be told to fail, stall or drop these
+        // requests so the offline behaviour of PowerSync's CRUD queue can be
+        // exercised. Set VITE_PROXY_URL=http://localhost:3000 to bypass it.
+        target: process.env.VITE_PROXY_URL ?? 'http://localhost:3100',
         changeOrigin: true,
       },
     },

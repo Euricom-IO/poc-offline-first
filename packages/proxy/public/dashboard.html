@@ -1,0 +1,847 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>proxy · fault injection</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='11' fill='%23b4552f'/><rect x='14' y='6' width='4' height='12' rx='2' fill='%23fff'/></svg>"
+    />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #faf9f7;
+        --panel: #ffffff;
+        --panel-2: #f4f3f0;
+        --border: #e3e1dc;
+        --text: #1c1b19;
+        --muted: #75726c;
+        --accent: #b4552f;
+        --ok: #2f7d54;
+        --warn: #9a6a09;
+        --bad: #b93a2f;
+        --drop: #6b4fa8;
+        --radius: 10px;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #171614;
+          --panel: #201f1c;
+          --panel-2: #282621;
+          --border: #38352f;
+          --text: #eceae5;
+          --muted: #9c978e;
+          --accent: #e0825c;
+          --ok: #62b98a;
+          --warn: #d3a63f;
+          --bad: #e2705f;
+          --drop: #a893e0;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+      header {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 10px 16px;
+        padding: 14px 20px;
+        border-bottom: 1px solid var(--border);
+        background: var(--panel);
+        position: sticky;
+        top: 0;
+        z-index: 5;
+      }
+      h1 {
+        font-size: 15px;
+        margin: 0;
+        letter-spacing: -0.01em;
+      }
+      h1 span { color: var(--muted); font-weight: 400; }
+      .spacer { flex: 1; }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: var(--panel-2);
+        font-size: 12px;
+        white-space: nowrap;
+      }
+      .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+      .dot.ok { background: var(--ok); }
+      .dot.bad { background: var(--bad); }
+      .dot.warn { background: var(--warn); }
+
+      main {
+        display: grid;
+        grid-template-columns: minmax(300px, 360px) minmax(0, 1fr);
+        gap: 16px;
+        padding: 16px 20px 40px;
+        max-width: 1400px;
+      }
+      @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+
+      .col { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 14px 16px;
+      }
+      .card h2 {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        margin: 0 0 10px;
+        font-weight: 600;
+      }
+
+      button {
+        font: inherit;
+        padding: 6px 11px;
+        border-radius: 7px;
+        border: 1px solid var(--border);
+        background: var(--panel-2);
+        color: var(--text);
+        cursor: pointer;
+      }
+      button:hover { border-color: var(--muted); }
+      button:active { transform: translateY(1px); }
+      button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+      button.ghost { background: transparent; }
+      button.danger { color: var(--bad); }
+      .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+      label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+      input, select {
+        font: inherit;
+        width: 100%;
+        padding: 6px 9px;
+        border-radius: 7px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--text);
+      }
+      .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+      .fields .wide { grid-column: 1 / -1; }
+      .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+      .mode-doc {
+        grid-column: 1 / -1;
+        margin: -2px 0 0;
+        padding-left: 9px;
+        border-left: 2px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .preview {
+        margin: 0 0 12px;
+        padding: 8px 10px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--panel-2);
+        font-size: 12px;
+      }
+      .preview .preview-label {
+        display: block;
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+        color: var(--muted);
+        margin-bottom: 3px;
+      }
+      .preview .preview-text { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .preview.error {
+        border-color: color-mix(in srgb, var(--bad) 50%, var(--border));
+        color: var(--bad);
+      }
+
+      .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+      .chip {
+        font-size: 12px;
+        padding: 4px 9px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+        background: var(--panel-2);
+        cursor: pointer;
+      }
+      .chip:hover { border-color: var(--accent); color: var(--accent); }
+
+      .fault-desc { font-size: 14px; margin: 0 0 10px; }
+      .fault-desc.none { color: var(--muted); }
+      .stats { display: flex; gap: 18px; }
+      .stat b { display: block; font-size: 20px; font-weight: 600; line-height: 1.2; }
+      .stat span { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+
+      .log { display: flex; flex-direction: column; gap: 1px; background: var(--border); border-radius: 8px; overflow: hidden; }
+      .entry { background: var(--panel); padding: 7px 10px; font-size: 12.5px; }
+      .entry .line { display: flex; align-items: center; gap: 8px; }
+      .entry .time { color: var(--muted); font-size: 11.5px; }
+      .entry .path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .tag {
+        font-size: 11px;
+        padding: 1px 6px;
+        border-radius: 5px;
+        border: 1px solid var(--border);
+        background: var(--panel-2);
+        white-space: nowrap;
+      }
+      .tag.method { font-weight: 600; }
+      .tag.s2 { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--border)); }
+      .tag.s4 { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--border)); }
+      .tag.s5 { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, var(--border)); }
+      .tag.none { color: var(--drop); border-color: color-mix(in srgb, var(--drop) 40%, var(--border)); }
+      .tag.fault { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+      .tag.stream {
+        color: var(--ok);
+        border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
+        font-variant-numeric: tabular-nums;
+      }
+      .tag.upstream { color: var(--drop); border-color: color-mix(in srgb, var(--drop) 35%, var(--border)); }
+      .preset-group { margin-bottom: 10px; }
+      .preset-group:last-child { margin-bottom: 0; }
+      .preset-group h3 {
+        font-size: 10.5px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+        margin: 0 0 6px;
+      }
+      .tag.pending {
+        color: var(--warn);
+        border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+        font-variant-numeric: tabular-nums;
+      }
+      @media (prefers-reduced-motion: no-preference) {
+        .tag.stream {
+        color: var(--ok);
+        border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
+        font-variant-numeric: tabular-nums;
+      }
+      .tag.upstream { color: var(--drop); border-color: color-mix(in srgb, var(--drop) 35%, var(--border)); }
+      .preset-group { margin-bottom: 10px; }
+      .preset-group:last-child { margin-bottom: 0; }
+      .preset-group h3 {
+        font-size: 10.5px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+        margin: 0 0 6px;
+      }
+      .tag.pending { animation: pulse 1.3s ease-in-out infinite; }
+      }
+      @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
+      .entry details { margin-top: 5px; }
+      .entry summary { cursor: pointer; color: var(--muted); font-size: 11.5px; }
+      .entry pre {
+        margin: 6px 0 0;
+        padding: 8px;
+        background: var(--panel-2);
+        border-radius: 6px;
+        font-size: 11.5px;
+        white-space: pre-wrap;
+        word-break: break-all;
+        max-height: 220px;
+        overflow: auto;
+      }
+      .empty { color: var(--muted); padding: 10px 2px; }
+
+      #toast {
+        position: fixed;
+        left: 50%;
+        bottom: 22px;
+        transform: translateX(-50%) translateY(12px);
+        background: var(--text);
+        color: var(--bg);
+        padding: 9px 15px;
+        border-radius: 8px;
+        font-size: 13px;
+        max-width: min(680px, 92vw);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.15s, transform 0.15s;
+        z-index: 20;
+      }
+      #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+      #toast.err { background: var(--bad); color: #fff; }
+
+      .banner {
+        margin: 0;
+        padding: 10px 20px;
+        background: color-mix(in srgb, var(--bad) 14%, var(--panel));
+        border-bottom: 1px solid var(--border);
+        color: var(--bad);
+        font-size: 13px;
+      }
+      [hidden] { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>proxy <span id="route">:3100 → api</span></h1>
+      <span class="pill"><span class="dot" id="dp-dot"></span><span id="dp-text">data plane</span></span>
+      <span class="pill"><span class="dot" id="api-dot"></span><span id="api-text">api</span></span>
+      <span class="pill"><span class="dot" id="ps-dot"></span><span id="ps-text">sync</span></span>
+      <span class="spacer"></span>
+      <span class="pill mono" id="clock">—</span>
+    </header>
+
+    <p class="banner" id="banner" hidden>
+      Control plane unreachable — is the proxy running? <code>bun run dev:proxy</code>
+    </p>
+
+    <main>
+      <div class="col">
+        <section class="card">
+          <h2>Presets</h2>
+          <div class="chips" id="presets"></div>
+        </section>
+
+        <section class="card">
+          <h2>Arm a fault</h2>
+          <form id="fault-form">
+            <div class="fields">
+              <div class="wide">
+                <label for="mode">Mode</label>
+                <select id="mode">
+                  <option value="offline">offline — 500, API never contacted</option>
+                  <option value="error">error — any status you pick</option>
+                  <option value="delay">delay — forward, but late</option>
+                  <option value="timeout">timeout — never answer</option>
+                  <option value="disconnect">disconnect — drop the connection</option>
+                </select>
+              </div>
+              <p class="mode-doc" id="mode-doc"></p>
+              <div id="status-field">
+                <label for="status">Status</label>
+                <input id="status" type="number" min="100" max="599" placeholder="500" />
+              </div>
+              <div>
+                <label for="delay">Delay (s)</label>
+                <input id="delay" type="number" min="0" max="30" step="1" placeholder="0" />
+              </div>
+              <div>
+                <label for="methods">Methods</label>
+                <input id="methods" type="text" placeholder="POST" />
+              </div>
+              <div>
+                <label for="count">Count</label>
+                <input id="count" type="number" min="1" placeholder="∞" />
+              </div>
+              <div class="wide">
+                <label for="path">Path prefix</label>
+                <input id="path" type="text" placeholder="/api/data — blank for every path" />
+                <p class="hint">
+                  Blank fields fall back to what each placeholder shows. Methods takes
+                  <code>POST</code>, <code>POST,PATCH</code> or <code>*</code>; count is how many
+                  requests to break before the rule disarms itself. The delay applies in
+                  <em>every</em> mode, so <code>offline</code> + 10s stalls and then fails. Nothing
+                  here ever affects this page — the control plane is never faulted.
+                </p>
+              </div>
+            </div>
+            <p class="preview" id="preview">
+              <span class="preview-label">On arm</span>
+              <span class="preview-text" id="preview-text">—</span>
+            </p>
+            <div class="row">
+              <button class="primary" type="submit">Arm fault</button>
+              <button class="ghost" type="button" id="disarm">Disarm</button>
+              <span class="spacer"></span>
+              <button class="ghost" type="button" id="reset">Reset all</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="card">
+          <h2>Open streams</h2>
+          <p class="hint" style="margin-top:0">
+            A fault only applies to requests as they <em>arrive</em>, so a client that is already
+            connected — the PowerSync download stream — keeps running until its connection breaks.
+            Cutting it is what makes an armed fault bite: the stream fails, the client reconnects,
+            and the fault is waiting.
+          </p>
+          <div class="row">
+            <button type="button" id="cut">Cut open streams</button>
+            <span class="hint" id="streams-text" style="margin-top:0">none open</span>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Listener</h2>
+          <p class="hint" style="margin-top:0">
+            A fault breaks requests. Taking the data plane down removes the server:
+            <code id="listener-data-port">:3100</code> refuses connections outright — both legs at
+            once. This page is on <code id="listener-control-port">:3101</code>, so it keeps working.
+          </p>
+          <div class="row">
+            <button type="button" id="down" class="danger">Take down</button>
+            <input id="seconds" type="number" min="1" max="600" placeholder="secs (blank = until /up)" style="width: 190px" />
+            <button type="button" id="up">Bring up</button>
+          </div>
+        </section>
+      </div>
+
+      <div class="col">
+        <section class="card">
+          <h2>Armed fault</h2>
+          <p class="fault-desc none" id="fault-desc">—</p>
+          <div class="stats">
+            <div class="stat"><b id="stat-total">0</b><span>requests</span></div>
+            <div class="stat"><b id="stat-forwarded">0</b><span>forwarded</span></div>
+            <div class="stat"><b id="stat-faulted">0</b><span>faulted</span></div>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>
+            Requests
+            <button class="ghost" type="button" id="clear-log" style="float:right;font-size:11px;padding:2px 8px">clear</button>
+          </h2>
+          <div class="log" id="log"></div>
+          <p class="empty" id="log-empty">Nothing yet. Traffic through <code>:3100</code> shows up here.</p>
+        </section>
+      </div>
+    </main>
+
+    <div id="toast"></div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      const POLL_MS = 1000;
+      // The upstream check is a real request against the API, which logs every
+      // one of them — so the status/log poll runs every second while this only
+      // runs every tenth tick (and the server caches it on top).
+      const HEALTH_EVERY_TICKS = 10;
+
+      // --- presets: the runs you actually want, one click each -------------
+      // Scoped by path, because the proxy now carries two legs: writes to the
+      // API and the PowerSync download stream.
+      const PRESET_GROUPS = [
+        [
+          'Writes → API',
+          [
+            ['Offline', { mode: 'offline', path: '/api' }],
+            ['Uploads only', { mode: 'offline', path: '/api/data' }],
+            ['Slow 5s', { mode: 'delay', delaySeconds: 5, path: '/api' }],
+            ['Drop connection', { mode: 'disconnect', path: '/api' }],
+            ['Poison 400', { mode: 'error', status: 400, path: '/api/data' }],
+            ['Flaky ×2 (503)', { mode: 'error', status: 503, count: 2, path: '/api' }],
+            ['401 everything', { mode: 'error', status: 401, methods: '*', path: '/api' }],
+          ],
+        ],
+        [
+          'Download → PowerSync',
+          [
+            // `cut` so the armed fault applies now, not whenever the open
+            // stream happens to break.
+            ['Break sync (500)', { mode: 'error', status: 500, methods: '*', path: '/powersync' }, { cut: '/powersync' }],
+            ['Stall sync 10s', { mode: 'delay', delaySeconds: 10, methods: '*', path: '/powersync' }, { cut: '/powersync' }],
+            ['Drop sync stream', { mode: 'disconnect', methods: '*', path: '/powersync' }, { cut: '/powersync' }],
+            ['Hang sync', { mode: 'timeout', methods: '*', path: '/powersync' }, { cut: '/powersync' }],
+          ],
+        ],
+      ];
+
+      // What each mode actually does to a client, spelled out — the option
+      // labels only have room for a few words.
+      const MODE_DOCS = {
+        offline:
+          'Answers straight away with the status below; the upstream never sees the request, so nothing is written and no sync data comes back. The client gets an HTTP error, not a network failure.',
+        error:
+          'Same mechanism, any status you pick. 400 is the poison-message case — /api/data collapses every failure into 400 and the client retries it forever. 401 ends the session, 429/503 look retryable.',
+        delay:
+          'Forwards as usual, just late. Nothing fails: use it to see whether a client gives up, re-sends, or blocks its queue while it waits.',
+        timeout:
+          'Never answers. The request hangs until the client gives up — fetch has no timeout of its own, so that can be a long time.',
+        disconnect:
+          'Drops the connection mid-response: a socket error rather than a status, the way an offline browser fails. Through the vite dev server it arrives as a 502 instead.',
+      };
+
+      /** Placeholder for the delay field — `delay` defaults to 5s, everything else to none. */
+      const DELAY_PLACEHOLDER = { delay: '5' };
+
+      let toastTimer;
+      function toast(message, isError) {
+        const el = $('toast');
+        el.textContent = message;
+        el.classList.toggle('err', !!isError);
+        el.classList.add('show');
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => el.classList.remove('show'), 3200);
+      }
+
+      async function call(path, options = {}) {
+        const res = await fetch(path, {
+          headers: { 'content-type': 'application/json' },
+          ...options,
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.error || res.statusText);
+        return body;
+      }
+
+      async function act(path, payload) {
+        try {
+          const body = await call(path, {
+            method: 'POST',
+            body: payload ? JSON.stringify(payload) : undefined,
+          });
+          toast(body.message || 'done');
+          refresh();
+        } catch (error) {
+          toast(error.message, true);
+        }
+      }
+
+      // Disabled buttons should look it.
+      const disabledStyle = document.createElement('style');
+      disabledStyle.textContent = 'button:disabled { opacity: 0.45; cursor: default; }';
+      document.head.append(disabledStyle);
+
+      // --- rendering -------------------------------------------------------
+      function statusClass(status) {
+        if (status === null || status === undefined) return 'none';
+        if (status < 300) return 's2';
+        if (status < 500) return 's4';
+        return 's5';
+      }
+
+      function renderStatus(data) {
+        $('banner').hidden = true;
+        $('route').textContent =
+          ':' + data.dataPlane.port + ' → ' + shortHost(data.target) + ' + ' + shortHost(data.powersyncTarget);
+        $('listener-data-port').textContent = ':' + data.dataPlane.port;
+        $('listener-control-port').textContent = ':' + new URL(data.controlPlane).port;
+
+        const dp = data.dataPlane;
+        $('dp-dot').className = 'dot ' + (dp.listening ? 'ok' : 'bad');
+        let text = 'proxy :' + dp.port + (dp.listening ? ' up' : ' DOWN');
+        if (!dp.listening && dp.restoresAt) {
+          const left = Math.max(0, Math.round((new Date(dp.restoresAt) - Date.now()) / 1000));
+          text += ' · back in ' + left + 's';
+        }
+        $('dp-text').textContent = text;
+
+        const fault = data.fault;
+        const desc = $('fault-desc');
+        desc.textContent = data.description;
+        desc.classList.toggle('none', !fault);
+
+        const streams = data.openStreams ?? [];
+        $('streams-text').textContent = streams.length
+          ? streams
+              .map((stream) => stream.path + ' · ' + elapsed(stream.openMs))
+              .join(', ')
+          : 'none open';
+        $('cut').disabled = streams.length === 0;
+
+        $('stat-total').textContent = data.stats.total;
+        $('stat-forwarded').textContent = data.stats.forwarded;
+        $('stat-faulted').textContent = data.stats.faulted;
+        $('clock').textContent = new Date().toLocaleTimeString();
+      }
+
+      /** `http://localhost:3002` → `:3002`, so the header shows this instance's real ports. */
+      function shortHost(url) {
+        try {
+          const parsed = new URL(url);
+          return ':' + (parsed.port || (parsed.protocol === 'https:' ? '443' : '80'));
+        } catch {
+          return url;
+        }
+      }
+
+      function renderHealth(data) {
+        const ok = data.targetReachable;
+        $('api-dot').className = 'dot ' + (ok ? 'ok' : 'bad');
+        $('api-text').textContent = 'api ' + shortHost(data.target) + (ok ? ' up' : ' unreachable');
+        const sync = data.powersync;
+        if (sync) {
+          $('ps-dot').className = 'dot ' + (sync.reachable ? 'ok' : 'bad');
+          $('ps-text').textContent =
+            'powersync ' + shortHost(sync.target) + (sync.reachable ? ' up' : ' unreachable');
+        }
+      }
+
+      function tag(text, className) {
+        const el = document.createElement('span');
+        el.className = 'tag ' + (className || '');
+        el.textContent = text;
+        return el;
+      }
+
+      // Which request bodies the reader has expanded, and what the list looked
+      // like last time. Re-rendering on every poll would collapse an open body
+      // (and drop any selection) a second after it was opened, so the list is
+      // only rebuilt when the entries actually change.
+      const openBodies = new Set();
+      let logSignature = null;
+      // Rows that are still moving: a request the proxy is holding (a delay or a
+      // `timeout` fault), or a response body still streaming — the PowerSync
+      // download sits here for as long as the client stays connected. They tick
+      // on their own, without rebuilding the list.
+      const liveRows = new Map();
+
+      function elapsed(ms) {
+        return (ms / 1000).toFixed(1) + 's';
+      }
+
+      function formatBytes(bytes) {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+      }
+
+      function renderLiveRow(row) {
+        const since = elapsed(Date.now() - row.startedMs);
+        row.el.textContent =
+          row.kind === 'streaming' ? '↓ ' + since + ' · ' + formatBytes(row.bytes) : '⋯ ' + since;
+      }
+
+      function tickPending() {
+        for (const row of liveRows.values()) renderLiveRow(row);
+      }
+
+      /** Refresh byte counts for open streams even when the list itself is unchanged. */
+      function updateLiveRows(entries) {
+        for (const entry of entries) {
+          const row = liveRows.get(entry.id);
+          if (!row) continue;
+          row.bytes = entry.bytes;
+          renderLiveRow(row);
+        }
+      }
+
+      function renderLog(entries) {
+        const signature =
+          entries.length +
+          ':' +
+          entries
+            .map(
+              (entry) =>
+                entry.id + (entry.pending ? 'p' : entry.streaming ? 's' : '=' + entry.status),
+            )
+            .join(',');
+        if (signature === logSignature) {
+          updateLiveRows(entries);
+          return;
+        }
+        logSignature = signature;
+
+        const log = $('log');
+        $('log-empty').hidden = entries.length > 0;
+        log.textContent = '';
+        liveRows.clear();
+        for (const entry of entries) {
+          const row = document.createElement('div');
+          row.className = 'entry';
+
+          const line = document.createElement('div');
+          line.className = 'line';
+
+          const time = document.createElement('span');
+          time.className = 'time mono';
+          time.textContent = new Date(entry.at).toLocaleTimeString();
+          line.append(time, tag(entry.method, 'method'));
+
+          const path = document.createElement('span');
+          path.className = 'path mono';
+          path.textContent = entry.path;
+          line.append(path);
+
+          if (entry.upstream === 'powersync') line.append(tag('sync', 'upstream'));
+          if (entry.fault) line.append(tag(entry.fault, 'fault'));
+          if (entry.pending || entry.streaming) {
+            // Still moving: show it counting, so a 30s stall or a live download
+            // stream is watchable rather than invisible.
+            const kind = entry.pending ? 'pending' : 'streaming';
+            const live = tag('⋯', kind === 'streaming' ? 'stream' : 'pending');
+            liveRows.set(entry.id, {
+              el: live,
+              kind,
+              bytes: entry.bytes,
+              startedMs: Date.parse(entry.at),
+            });
+            if (entry.streaming) line.append(tag(String(entry.status), statusClass(entry.status)));
+            line.append(live);
+          } else {
+            if (entry.durationMs >= 100) line.append(tag(entry.durationMs + 'ms', ''));
+            if (entry.bytes) line.append(tag(formatBytes(entry.bytes), ''));
+            line.append(
+              tag(entry.status === null ? 'dropped' : String(entry.status), statusClass(entry.status)),
+            );
+          }
+          row.append(line);
+
+          if (entry.body) {
+            const details = document.createElement('details');
+            const summary = document.createElement('summary');
+            summary.textContent = 'body';
+            const pre = document.createElement('pre');
+            pre.className = 'mono';
+            pre.textContent = entry.body;
+            details.append(summary, pre);
+            details.open = openBodies.has(entry.id);
+            details.addEventListener('toggle', () => {
+              if (details.open) openBodies.add(entry.id);
+              else openBodies.delete(entry.id);
+            });
+            row.append(details);
+          }
+          log.append(row);
+        }
+        tickPending();
+      }
+
+      // --- polling ---------------------------------------------------------
+      let inFlight = false;
+      async function refresh() {
+        if (inFlight || document.hidden) return;
+        inFlight = true;
+        try {
+          const [status, log] = await Promise.all([call('/status'), call('/log?limit=40')]);
+          renderStatus(status);
+          renderLog(log.entries);
+        } catch {
+          $('banner').hidden = false;
+          $('dp-dot').className = 'dot bad';
+          $('dp-text').textContent = 'control plane unreachable';
+        } finally {
+          inFlight = false;
+        }
+        if (healthTick++ % HEALTH_EVERY_TICKS === 0) {
+          call('/health').then(renderHealth).catch(() => {});
+        }
+      }
+      let healthTick = 0;
+
+      // --- wiring ----------------------------------------------------------
+      for (const [groupLabel, presets] of PRESET_GROUPS) {
+        const group = document.createElement('div');
+        group.className = 'preset-group';
+        const heading = document.createElement('h3');
+        heading.textContent = groupLabel;
+        const chips = document.createElement('div');
+        chips.className = 'chips';
+        for (const [label, payload, options] of presets) {
+          const chip = document.createElement('button');
+          chip.type = 'button';
+          chip.className = 'chip';
+          chip.textContent = label;
+          chip.addEventListener('click', async () => {
+            fillForm(payload);
+            await act('/fault', payload);
+            if (options?.cut) await act('/cut', { path: options.cut });
+          });
+          chips.append(chip);
+        }
+        group.append(heading, chips);
+        $('presets').append(group);
+      }
+
+      function fillForm(payload) {
+        $('mode').value = payload.mode;
+        $('status').value = payload.status ?? '';
+        $('delay').value = payload.delaySeconds ?? '';
+        $('methods').value = payload.methods ?? '';
+        $('path').value = payload.path ?? '';
+        $('count').value = payload.count ?? '';
+        syncModeFields();
+      }
+
+      function syncModeFields() {
+        const mode = $('mode').value;
+        $('status-field').hidden = mode !== 'offline' && mode !== 'error';
+        $('mode-doc').textContent = MODE_DOCS[mode] ?? '';
+        $('delay').placeholder = DELAY_PLACEHOLDER[mode] ?? '0';
+        schedulePreview();
+      }
+      $('mode').addEventListener('change', syncModeFields);
+
+      function collectPayload() {
+        const payload = { mode: $('mode').value };
+        const status = Number($('status').value);
+        const delay = Number($('delay').value);
+        const count = Number($('count').value);
+        const methods = $('methods').value.trim();
+        const path = $('path').value.trim();
+        if ($('status').value && Number.isFinite(status)) payload.status = status;
+        if ($('delay').value && Number.isFinite(delay)) payload.delaySeconds = delay;
+        if ($('count').value && Number.isFinite(count)) payload.count = count;
+        if (methods) payload.methods = methods.includes(',') ? methods.split(',').map((m) => m.trim()) : methods;
+        if (path) payload.path = path;
+        return payload;
+      }
+
+      // The preview sentence comes from the server (`dryRun`), so it is the same
+      // description it will report once armed — and invalid input is reported
+      // here rather than after clicking.
+      let previewTimer;
+      function schedulePreview() {
+        clearTimeout(previewTimer);
+        previewTimer = setTimeout(runPreview, 200);
+      }
+
+      async function runPreview() {
+        const preview = $('preview');
+        try {
+          const body = await call('/fault', {
+            method: 'POST',
+            body: JSON.stringify({ ...collectPayload(), dryRun: true }),
+          });
+          $('preview-text').textContent = body.valid ? body.message : body.error;
+          preview.classList.toggle('error', !body.valid);
+        } catch (error) {
+          $('preview-text').textContent = error.message;
+          preview.classList.add('error');
+        }
+      }
+
+      $('fault-form').addEventListener('input', schedulePreview);
+      $('fault-form').addEventListener('submit', (event) => {
+        event.preventDefault();
+        act('/fault', collectPayload());
+      });
+
+      $('cut').addEventListener('click', () => act('/cut'));
+      $('disarm').addEventListener('click', () => act('/online'));
+      $('reset').addEventListener('click', () => act('/reset'));
+      $('up').addEventListener('click', () => act('/up'));
+      $('down').addEventListener('click', () => {
+        const seconds = Number($('seconds').value);
+        act('/down', $('seconds').value && Number.isFinite(seconds) ? { seconds } : undefined);
+      });
+      $('clear-log').addEventListener('click', async () => {
+        try {
+          await call('/log', { method: 'DELETE' });
+          refresh();
+        } catch (error) {
+          toast(error.message, true);
+        }
+      });
+
+      // After every declaration above is in scope.
+      syncModeFields();
+      refresh();
+      setInterval(refresh, POLL_MS);
+      setInterval(tickPending, 250);
+      document.addEventListener('visibilitychange', () => !document.hidden && refresh());
+    </script>
+  </body>
+</html>

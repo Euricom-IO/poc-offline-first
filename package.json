@@ -7,8 +7,9 @@
   "scripts": {
     "dev": "bun run --filter '@app/api' dev & bun run --filter '@app/web' dev",
     "dev2": "bun run --filter '@app/api' dev & bun run --filter '@app/web-electric' dev",
-    "dev3": "bun run --filter '@app/api' dev & bun run --filter '@app/web-powersync' dev",
+    "dev3": "bun run --filter '@app/api' dev & bun run --filter '@app/proxy' dev & bun run --filter '@app/web-powersync' dev",
     "dev:api": "bun run --filter '@app/api' dev",
+    "dev:proxy": "bun run --filter '@app/proxy' dev",
     "dev:web": "bun run --filter '@app/web' dev",
     "dev:web-electric": "bun run --filter '@app/web-electric' dev",
     "dev:web-powersync": "bun run --filter '@app/web-powersync' dev",

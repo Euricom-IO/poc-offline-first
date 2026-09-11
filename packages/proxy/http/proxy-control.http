@@ -1,0 +1,330 @@
+###############################################################################
+# @app/proxy — control plane
+#
+# Written for the VS Code "REST Client" extension (humao.rest-client): click the
+# "Send Request" link above any block. JetBrains' HTTP client runs these too.
+#
+# Every action here is also a button on the dashboard: http://localhost:3101/ui
+#
+# Start the stack first:  bun run dev3   (api :3000 + proxy :3100 + web :5175)
+# or just the two servers: bun run dev:api  and  bun run dev:proxy
+#
+# Two listeners:
+#   :3100  data plane    — forwards to the API; this is what faults apply to,
+#                          and what POST /down takes away entirely
+#   :3101  control plane — these requests; always up, so it still answers while
+#                          :3100 is refusing connections
+#
+# The same control routes are also mounted on the data port under /__proxy
+# (`:3100/__proxy/status`), which is handy while it is up — but only :3101 can
+# bring it back once it is down.
+###############################################################################
+
+@control = http://localhost:3101
+@proxy = http://localhost:3100
+
+### What the control plane exposes (endpoints, modes, defaults)
+# Same URL serves the dashboard to a browser; asking for JSON gets this instead.
+GET {{control}}/
+Accept: application/json
+
+### Armed fault + counters
+GET {{control}}/status
+
+### Is the API behind the proxy actually up? (proxy → http://localhost:3000/health)
+GET {{control}}/health
+
+###############################################################################
+# Arm a fault
+#
+# POST :3101/fault — { mode, status?, delaySeconds?, delayMs?, methods?,
+#                     path?, count?, message? }
+#
+#   mode        offline | error | delay | timeout | disconnect | off
+#   methods     default ["POST"];  "*" for every method
+#   path        pathname prefix, default every path (e.g. "/api/data")
+#   count       fault only the next N requests, then disarm automatically
+#   delay*      applied in every mode, max 30s
+###############################################################################
+
+### Offline: answer every POST with 500 without ever contacting the API
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "offline"
+}
+
+### Offline, scoped to the PowerSync upload only — login and /api/powersync/token keep working
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "offline",
+  "path": "/api/data"
+}
+
+### Offline for the next 3 POSTs only, then back to normal by itself
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "offline",
+  "count": 3
+}
+
+### Shorthand for { "mode": "offline" } — same options accepted
+POST {{control}}/offline
+Content-Type: application/json
+
+{
+  "path": "/api/data"
+}
+
+### Slow network: forward every POST after a 5 second stall
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "delay",
+  "delaySeconds": 5
+}
+
+### Maximum stall (30s) on the PowerSync upload — watch the CRUD queue wait it out
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "delay",
+  "delaySeconds": 30,
+  "path": "/api/data"
+}
+
+### Stall 10s and *then* fail with a 500 (delay applies in every mode)
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "offline",
+  "delaySeconds": 10
+}
+
+### Disconnect: drop the connection. Straight at the proxy the client gets no
+### HTTP status at all, just a socket error; through the vite dev server it
+### surfaces as a 502 (vite answers for the upstream it lost)
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "disconnect"
+}
+
+### Timeout: never answer; the request hangs until the client gives up
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "timeout"
+}
+
+### Any status you like — 400 is the interesting one: /api/data collapses every
+### failure into 400 and the client retries forever, so this poisons the queue
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "error",
+  "status": 400,
+  "message": "proxy: simulated poison message",
+  "path": "/api/data"
+}
+
+### 401: the client should drop its session (see api.ts) rather than retry
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "error",
+  "status": 401,
+  "methods": "*"
+}
+
+### 503 twice, then recovery — the shape of a server restart
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "error",
+  "status": 503,
+  "count": 2
+}
+
+### Describe a rule without arming it — same sentence the dashboard previews
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "offline",
+  "delaySeconds": 10,
+  "path": "/api/data",
+  "count": 3,
+  "dryRun": true
+}
+
+###############################################################################
+# The PowerSync download stream
+#
+# The proxy carries both legs: writes go to the API under /api/*, and the
+# download stream goes to the PowerSync service under /powersync/* (the prefix
+# is stripped on the way through). Scope a fault with `path` to break one leg
+# and leave the other working.
+#
+# A fault applies to a request as it *arrives*, and the download stream arrived
+# minutes ago — so after arming one, cut the open stream to make the client
+# reconnect into it.
+###############################################################################
+
+### Break the download stream (writes keep working)
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "error",
+  "status": 500,
+  "methods": "*",
+  "path": "/powersync"
+}
+
+### Cut what is already connected, so the fault bites now
+POST {{control}}/cut
+Content-Type: application/json
+
+{
+  "path": "/powersync"
+}
+
+### Cut every open stream, whatever the leg
+POST {{control}}/cut
+
+### Stall the download stream by 10s on every reconnect
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "delay",
+  "delaySeconds": 10,
+  "methods": "*",
+  "path": "/powersync"
+}
+
+### Break reads while writes still land (the interesting asymmetry)
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "offline",
+  "methods": "*",
+  "path": "/powersync"
+}
+
+### What is connected right now (status lists open streams)
+GET {{control}}/status
+
+###############################################################################
+# Take the whole listener down
+#
+# A fault breaks requests; this breaks the server. With the data plane stopped
+# there is nothing listening on :3100 at all, so a client fails to connect
+# (ECONNREFUSED) instead of receiving an injected error — the difference
+# between "the server said no" and "there is no server".
+#
+# Through the vite dev server this still reaches the browser as a 502: vite
+# catches the refused connection and answers on the proxy's behalf.
+###############################################################################
+
+### Down until further notice — :3100 refuses every connection
+POST {{control}}/down
+
+### Prove it: this one fails to connect (the control plane above still answers)
+GET {{proxy}}/api/health
+
+### Back up
+POST {{control}}/up
+
+### Down for 20s, then it restores itself — a server restart, roughly
+POST {{control}}/down
+Content-Type: application/json
+
+{
+  "seconds": 20
+}
+
+### Where things stand (fault + data-plane state + counters)
+GET {{control}}/status
+
+### The control routes on the data port work too — while it is up
+GET {{proxy}}/__proxy/status
+
+###############################################################################
+# Disarm
+###############################################################################
+
+### Back online (fault cleared, request log kept)
+POST {{control}}/online
+
+### Same thing, as a verb on the resource
+DELETE {{control}}/fault
+
+### Clean slate: fault cleared, data plane back up, log and counters emptied
+POST {{control}}/reset
+
+###############################################################################
+# Observe
+###############################################################################
+
+### Recent requests, newest first (method, path, fault applied, status, duration, body)
+GET {{control}}/log
+
+### Just the last 5
+GET {{control}}/log?limit=5
+
+### Empty the log
+DELETE {{control}}/log
+
+###############################################################################
+# Validation — these all answer 400 with an explanation
+###############################################################################
+
+### Unknown mode
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "explode"
+}
+
+### Delay above the 30s ceiling
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "delay",
+  "delaySeconds": 45
+}
+
+### count must be >= 1
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "offline",
+  "count": 0
+}
+
+### seconds must be 1..600
+POST {{control}}/down
+Content-Type: application/json
+
+{
+  "seconds": 9999
+}

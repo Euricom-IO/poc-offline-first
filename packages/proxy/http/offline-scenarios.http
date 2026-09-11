@@ -1,0 +1,441 @@
+###############################################################################
+# @app/proxy — offline scenarios, step by step
+#
+# Each scenario is a numbered run: arm a fault, send a write, look at what the
+# client got, then recover. Send them in order within a scenario.
+#
+# The dashboard at http://localhost:3101/ui arms the same faults with a click
+# and shows the request log live — handy while driving the app in the browser.
+#
+# Start with: bun run dev3   (api :3000 + proxy :3100 + web-powersync :5175)
+# Send block 0 first — everything below reuses its token.
+#
+# Faults are armed on the control port (:3101); the requests being broken go to
+# the data port (:3100). They are separate listeners so the control plane keeps
+# answering even in scenario 8, where :3100 is taken away completely.
+###############################################################################
+
+@control = http://localhost:3101
+@proxy = http://localhost:3100
+@todoId = cccccccc-0000-4000-8000-000000000001
+
+### 0. Log in and start from a clean slate
+# @name login
+POST {{proxy}}/api/auth/login
+Content-Type: application/json
+
+{
+  "name": "peter",
+  "pin": "12345"
+}
+
+@token = {{login.response.body.$.token}}
+@userId = {{login.response.body.$.user.id}}
+
+### 0b. Clear any fault left over from an earlier run
+POST {{control}}/reset
+
+###############################################################################
+# Scenario 1 — the server is gone
+#
+# Expect: 1.2 answers 500 and the API is never contacted (nothing is written).
+# After 1.3 the very same request succeeds, which is what a client replaying its
+# queue after reconnecting does.
+###############################################################################
+
+### 1.1 Go offline for writes
+POST {{control}}/offline
+
+### 1.2 Upload a CRUD batch → 500, row not written
+POST {{proxy}}/api/data
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "batch": [
+    {
+      "op": "PUT",
+      "table": "todos",
+      "id": "{{todoId}}",
+      "data": {
+        "id": "{{todoId}}",
+        "user_id": "{{userId}}",
+        "title": "Written while offline",
+        "completed": 0,
+        "created_at": "2026-09-11T10:00:00.000Z"
+      }
+    }
+  ]
+}
+
+### 1.3 Back online
+POST {{control}}/online
+
+### 1.4 Replay the exact same batch → 200, and it lands
+POST {{proxy}}/api/data
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "batch": [
+    {
+      "op": "PUT",
+      "table": "todos",
+      "id": "{{todoId}}",
+      "data": {
+        "id": "{{todoId}}",
+        "user_id": "{{userId}}",
+        "title": "Written while offline",
+        "completed": 0,
+        "created_at": "2026-09-11T10:00:00.000Z"
+      }
+    }
+  ]
+}
+
+### 1.5 Send 1.4 once more → still 200. Client-generated ids make the replay a
+### no-op instead of a duplicate (onConflictDoNothing on the primary key)
+GET {{proxy}}/api/todos
+Authorization: Bearer {{token}}
+
+###############################################################################
+# Scenario 2 — flaky server that recovers on its own
+#
+# `count` disarms the fault automatically, so a retrying client heals without
+# anyone touching the control plane.
+###############################################################################
+
+### 2.1 Fail the next two writes with 503, then recover
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "error",
+  "status": 503,
+  "count": 2
+}
+
+### 2.2 First attempt → 503
+POST {{proxy}}/api/todos
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "id": "cccccccc-0000-4000-8000-000000000002",
+  "title": "Retry me"
+}
+
+### 2.3 Second attempt → 503 (the fault disarms itself after this one)
+POST {{proxy}}/api/todos
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "id": "cccccccc-0000-4000-8000-000000000002",
+  "title": "Retry me"
+}
+
+### 2.4 Third attempt → 201, no control call needed
+POST {{proxy}}/api/todos
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "id": "cccccccc-0000-4000-8000-000000000002",
+  "title": "Retry me"
+}
+
+###############################################################################
+# Scenario 3 — slow network
+#
+# The request still succeeds, it just takes 30s. Useful for watching whether a
+# client gives up, double-sends, or blocks its queue while it waits.
+###############################################################################
+
+### 3.1 Stall the PowerSync upload for 30s (the maximum)
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "delay",
+  "delaySeconds": 30,
+  "path": "/api/data"
+}
+
+### 3.2 Upload — takes ~30s, then 200
+POST {{proxy}}/api/data
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "batch": [
+    {
+      "op": "PATCH",
+      "table": "todos",
+      "id": "{{todoId}}",
+      "data": { "id": "{{todoId}}", "completed": 1 }
+    }
+  ]
+}
+
+### 3.3 A GET is untouched — the fault is scoped to POST, so reads stay instant
+GET {{proxy}}/api/todos
+Authorization: Bearer {{token}}
+
+### 3.4 Clear
+POST {{control}}/online
+
+###############################################################################
+# Scenario 4 — dropped connection
+#
+# Straight at the proxy (these blocks) there is no HTTP status at all: the
+# connection dies and the REST Client reports a socket error. Use this to test
+# that a client treats "no answer" differently from "an answer that says no".
+#
+# From the app at :5175 it arrives as a 502 instead — vite's dev-server proxy
+# catches the dropped upstream socket and answers on its behalf. Either way the
+# request fails and the CRUD queue holds its ops.
+###############################################################################
+
+### 4.1 Arm it
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "disconnect"
+}
+
+### 4.2 Upload → connection dropped, no response
+POST {{proxy}}/api/data
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "batch": [
+    {
+      "op": "PATCH",
+      "table": "todos",
+      "id": "{{todoId}}",
+      "data": { "id": "{{todoId}}", "completed": 0 }
+    }
+  ]
+}
+
+### 4.3 The proxy still logs it (status: null, fault: "disconnect")
+GET {{control}}/log?limit=3
+
+### 4.4 Clear
+POST {{control}}/online
+
+###############################################################################
+# Scenario 5 — the request that never comes back
+#
+# The proxy holds the request open; nothing answers. Cancel it in your editor
+# when you have seen enough, or leave it and watch what the client does.
+###############################################################################
+
+### 5.1 Arm it
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "timeout",
+  "path": "/api/data"
+}
+
+### 5.2 This one hangs
+POST {{proxy}}/api/data
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "batch": []
+}
+
+### 5.3 Clear (this still answers — the control plane is never faulted)
+POST {{control}}/online
+
+###############################################################################
+# Scenario 6 — poison message
+#
+# /api/data turns every failure into a flat 400 and the client just retries, so
+# one permanently-rejected op blocks the CRUD queue forever. Arming a 400 here
+# reproduces that head-of-line block without needing a genuinely invalid op.
+###############################################################################
+
+### 6.1 Every upload is rejected as a client error
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "error",
+  "status": 400,
+  "message": "proxy: simulated poison message",
+  "path": "/api/data"
+}
+
+### 6.2 Upload → 400, forever, no matter how often it is retried
+POST {{proxy}}/api/data
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "batch": [
+    {
+      "op": "PATCH",
+      "table": "todos",
+      "id": "{{todoId}}",
+      "data": { "id": "{{todoId}}", "completed": 1 }
+    }
+  ]
+}
+
+### 6.3 Clear
+POST {{control}}/reset
+
+###############################################################################
+# Scenario 7 — drive it from the browser
+#
+# 1. bun run dev3 and sign in at http://localhost:5175 (peter / 12345).
+# 2. Send 7.1 below.
+# 3. Add/tick todos in the app: the UI stays instant (local SQLite) while every
+#    upload fails. PowerSync keeps the ops in its CRUD queue and retries.
+# 4. Send 7.2 to watch the failed attempts pile up.
+# 5. Send 7.3. The queue drains on the next attempt and the rows reach Postgres.
+#
+# Note this only breaks the *upload* path. The download stream goes straight
+# from the browser to the PowerSync service on :8080 and does not pass through
+# this proxy yet, so rows written elsewhere still stream in.
+###############################################################################
+
+### 7.1 Break uploads only, leaving login and /api/powersync/token alone
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "offline",
+  "path": "/api/data"
+}
+
+### 7.2 What the app has been trying to send
+GET {{control}}/log?limit=20
+
+### 7.3 Let it through again
+POST {{control}}/online
+
+###############################################################################
+# Scenario 8 — the proxy is not there at all
+#
+# Everything above answers *something*. This one stops the data-plane listener,
+# so :3100 refuses connections outright: the client never gets to send its
+# request. That is the failure a client hits when the backend is genuinely
+# down, and some clients handle it differently from an error response.
+#
+# Straight at :3100 you get a connection error. From the app at :5175 vite
+# answers 502 on the proxy's behalf (it logs `http proxy error … ECONNREFUSED`),
+# so PowerSync sees a failed upload either way and keeps its CRUD queue.
+###############################################################################
+
+### 8.1 Stop the listener
+POST {{control}}/down
+
+### 8.2 Nothing to connect to — this fails before any HTTP happens
+POST {{proxy}}/api/data
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "batch": []
+}
+
+### 8.3 The control plane is on its own port, so it still answers
+GET {{control}}/status
+
+### 8.4 Bring it back
+POST {{control}}/up
+
+### 8.5 Works again
+POST {{proxy}}/api/data
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "batch": []
+}
+
+### 8.6 Same thing, self-healing: gone for 15s, then back on its own
+POST {{control}}/down
+Content-Type: application/json
+
+{
+  "seconds": 15
+}
+
+###############################################################################
+# Scenario 9 — the download stream goes offline
+#
+# The other scenarios break writes. This one breaks reads: the long-lived
+# `POST /powersync/sync/stream` that PowerSync holds open to receive changes.
+#
+# 1. bun run dev3, sign in at http://localhost:5175, and send 9.1 to see the
+#    open stream (`openStreams` in the response).
+# 2. Send 9.2: the fault is armed *and* the open stream is cut, so the client
+#    reconnects straight into it. The app keeps working — it reads local SQLite
+#    — but nothing new arrives. Change a todo in another browser to prove it.
+# 3. Send 9.3 and watch the retries pile up, each one a 500.
+# 4. Send 9.4. The next reconnect succeeds and everything that happened
+#    meanwhile streams in at once.
+#
+# Writes are untouched throughout (the fault is scoped to /powersync), so this
+# is the "reads are dead, writes are fine" case that is otherwise hard to stage.
+###############################################################################
+
+### 9.1 What is streaming right now
+GET {{control}}/status
+
+### 9.2 Break reads, and cut the stream that is already connected
+POST {{control}}/fault
+Content-Type: application/json
+
+{
+  "mode": "error",
+  "status": 500,
+  "methods": "*",
+  "path": "/powersync"
+}
+
+###
+POST {{control}}/cut
+Content-Type: application/json
+
+{
+  "path": "/powersync"
+}
+
+### 9.3 The client retrying into the fault
+GET {{control}}/log?limit=10
+
+### 9.4 Let it back in
+POST {{control}}/online
+
+### 9.5 A write still works while reads are broken — arm 9.2 again first
+POST {{proxy}}/api/data
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "batch": [
+    {
+      "op": "PUT",
+      "table": "todos",
+      "id": "cccccccc-0000-4000-8000-000000000009",
+      "data": {
+        "id": "cccccccc-0000-4000-8000-000000000009",
+        "user_id": "{{userId}}",
+        "title": "Written while reads are down",
+        "completed": 0,
+        "created_at": "2026-09-11T12:00:00.000Z"
+      }
+    }
+  ]
+}

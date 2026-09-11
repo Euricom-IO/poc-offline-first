@@ -20,6 +20,7 @@ packages/
   web            @app/web            React SPA — REST-backed TanStack DB query collections
   web-electric   @app/web-electric   React SPA — ElectricSQL reads + offline event-sync writes
   web-powersync  @app/web-powersync  React SPA — PowerSync local-first SQLite + CRUD upload
+  proxy          @app/proxy          Dev/test proxy in front of the API that can fail on demand
 ```
 
 Bun workspaces only (no Turborepo). Root scripts fan out with `bun run --filter`.
@@ -51,7 +52,7 @@ bun run db:seed      # create the initial admin user
 
 bun run dev          # API (:3000) + web           (:5173) — REST-backed frontend
 bun run dev2         # API (:3000) + web-electric  (:5174) — ElectricSQL frontend
-bun run dev3         # API (:3000) + web-powersync (:5175) — PowerSync frontend
+bun run dev3         # API (:3000) + proxy (:3100/:3101) + web-powersync (:5175) — PowerSync frontend
 ```
 
 Open the frontend you started (http://localhost:5173, `:5174` or `:5175`) and
@@ -154,14 +155,71 @@ Postgres. Both directions run through
 > global and unfiltered, so every client syncs every row. Scope the streams by
 > the token's user id before any real use.
 
+## Testing offline behaviour: the fault-injection proxy
+
+[`packages/proxy`](packages/proxy) (`@app/proxy`) is a small reverse proxy that
+sits between `web-powersync` and the API:
+
+```
+web-powersync :5175  ─┬─ /api/*        → proxy :3100 → api :3000 → postgres
+                      └─ /powersync/*  → proxy :3100 → powersync :8080
+                                             ↑
+                                  control plane :3101
+```
+
+It forwards everything verbatim until a fault is armed through its control
+plane, and then it can answer `500`s without ever contacting the API, stall a
+request for up to 30s, hang forever, drop the connection, or stop listening
+altogether — so PowerSync's CRUD queue can be watched holding, retrying and
+finally draining its ops. `bun run dev3` starts it alongside the API and the
+frontend, and the vite dev server already forwards `/api` through it.
+
+The control plane runs on its own port (`:3101`) so it stays reachable while
+the proxy itself is down. It serves a **dashboard at
+<http://localhost:3101/ui>** — one-click presets for every failure mode, a
+take-down/bring-up control, and a live request log — or drive it with HTTP:
+
+```bash
+# break every write; reads and /api/powersync/token keep working
+curl -X POST http://localhost:3101/offline
+
+# …use the app at :5175: it stays instant, uploads keep failing…
+curl http://localhost:3101/log          # what it has been trying to send
+curl -X POST http://localhost:3101/online   # queue drains
+
+# or take the listener away entirely: :3100 refuses connections
+curl -X POST http://localhost:3101/down -H 'content-type: application/json' -d '{"seconds":20}'
+```
+
+Both PowerSync legs run through it — the CRUD upload (`POST /api/data`) and the
+download stream (`POST /powersync/sync/stream`) — so reads can be broken as
+easily as writes:
+
+```bash
+# break the download stream and cut the one that is already connected
+curl -X POST http://localhost:3101/fault -H 'content-type: application/json' \
+  -d '{"mode":"error","status":500,"methods":"*","path":"/powersync"}'
+curl -X POST http://localhost:3101/cut -d '{"path":"/powersync"}' -H 'content-type: application/json'
+```
+
+Only `POST` is faulted by default, and the fault can be scoped to a path
+(`{"path": "/api/data"}`) or to the next N requests (`{"count": 3}`).
+[`packages/proxy/http/`](packages/proxy/http) holds `.http` files (VS Code REST
+Client) covering every mode and a set of numbered offline scenarios; see the
+[package README](packages/proxy/README.md) for the dashboard and the full
+control plane. The
+PowerSync **download** stream (browser → `:8080`) does not pass through the
+proxy yet.
+
 ## Scripts (run from the repo root)
 
 | Script                       | Description                                   |
 | ---------------------------- | --------------------------------------------- |
 | `bun run dev`                | Run API + web dev servers                     |
 | `bun run dev2`               | Run API + web-electric (ElectricSQL) servers  |
-| `bun run dev3`               | Run API + web-powersync (PowerSync) servers   |
+| `bun run dev3`               | Run API + fault-injection proxy + web-powersync |
 | `bun run dev:api`            | API only (`bun --hot`)                        |
+| `bun run dev:proxy`          | Fault-injection proxy only (`bun --hot`)      |
 | `bun run dev:web`            | Web only (vite)                               |
 | `bun run dev:web-electric`   | web-electric only (vite)                      |
 | `bun run dev:web-powersync`  | web-powersync only (vite)                     |
@@ -252,9 +310,11 @@ PowerSync service, and the API that mints its tokens.
    bun run db:seed     # creates the peter / 12345 admin
    ```
 
-4. **Run the app** — `bun run dev3` starts the API (`:3000`) and the
-   `web-powersync` dev server (`:5175`); `bun run dev:web-powersync` runs only
-   the frontend if the API is already up.
+4. **Run the app** — `bun run dev3` starts the API (`:3000`), the
+   fault-injection proxy (`:3100`, control plane `:3101`) and the
+   `web-powersync` dev server
+   (`:5175`); `bun run dev:web-powersync` runs only the frontend if the other
+   two are already up.
 
 5. **Sign in** at http://localhost:5175 and check the browser console: you
    should see `[powersync] init http://localhost:8080` followed by a successful

@@ -3,6 +3,7 @@ import {
   WASQLiteOpenFactory,
   WASQLiteVFS,
   Schema,
+  SyncStreamConnectionMethod,
   Table,
   column,
   type AbstractPowerSyncDatabase,
@@ -82,7 +83,27 @@ export const db = new PowerSyncDatabase({
 
 // The PowerSync service endpoint (self-hosted or PowerSync Cloud) that streams
 // changes back down. Left unset in this POC — see initPowerSync() below.
+// Note the endpoint returned by GET /api/powersync/token wins over this one.
 const POWERSYNC_URL = import.meta.env.VITE_POWERSYNC_URL as string | undefined;
+
+/**
+ * Transport for the download stream.
+ *
+ * The SDK's default is a WebSocket (RSocket framing over `ws://…/sync/stream`).
+ * This POC uses PowerSync's **HTTP streaming** mode instead — one long-lived
+ * `POST /sync/stream` whose response is newline-delimited JSON — because that
+ * is an ordinary HTTP request, so it can be routed through the fault-injection
+ * proxy (packages/proxy) and made to fail, stall or drop like any other. The
+ * cost is the slightly chattier HTTP framing.
+ *
+ * Set `VITE_POWERSYNC_TRANSPORT=websocket` to use the default instead; then
+ * point `POWERSYNC_URL` back at the service directly (`http://localhost:8080`),
+ * because the proxy does not bridge WebSocket upgrades.
+ */
+const CONNECTION_METHOD =
+  (import.meta.env.VITE_POWERSYNC_TRANSPORT as string | undefined) === 'websocket'
+    ? SyncStreamConnectionMethod.WEB_SOCKET
+    : SyncStreamConnectionMethod.HTTP;
 
 /** One upload item as understood by the backend `/api/data` endpoint. */
 export interface UploadOp {
@@ -186,7 +207,8 @@ export async function initPowerSync(): Promise<void> {
 
   if (POWERSYNC_URL) {
     // Real service configured: PowerSync drives both download and upload.
-    await db.connect(connector);
+    console.log('[powersync] connecting over', CONNECTION_METHOD);
+    await db.connect(connector, { connectionMethod: CONNECTION_METHOD });
     return;
   }
 

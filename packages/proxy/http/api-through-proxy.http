@@ -1,0 +1,252 @@
+###############################################################################
+# @app/proxy — the API, as seen through the proxy
+#
+# Same requests the web-powersync app makes, pointed at the proxy (:3100)
+# instead of the API (:3000). With no fault armed the answers are identical —
+# that is the point. Arm something from proxy-control.http and re-run any block
+# to see it fail, stall or drop.
+#
+# Needs: bun run db:up, bun run db:migrate, bun run db:seed, then bun run dev3.
+# Send the login block first — the other blocks reuse its token.
+###############################################################################
+
+@proxy = http://localhost:3100
+@api = http://localhost:3000
+
+# Client-generated ids, exactly as every write path in this repo expects. They
+# are fixed rather than random so a re-send replays the same row: insert is
+# idempotent on the primary key (onConflictDoNothing), which is what makes a
+# retried CRUD batch a no-op instead of a duplicate.
+@todoId = aaaaaaaa-0000-4000-8000-000000000001
+@newUserId = bbbbbbbb-0000-4000-8000-000000000001
+
+###############################################################################
+# Auth
+###############################################################################
+
+### Log in (seeded admin) — every block below uses this response
+# @name login
+POST {{proxy}}/api/auth/login
+Content-Type: application/json
+
+{
+  "name": "peter",
+  "pin": "12345"
+}
+
+@token = {{login.response.body.$.token}}
+@userId = {{login.response.body.$.user.id}}
+
+### Who am I (verifies the token travels through the proxy untouched)
+GET {{proxy}}/api/auth/me
+Authorization: Bearer {{token}}
+
+### Heartbeat
+GET {{proxy}}/api/health
+
+### The same heartbeat straight at the API — compare when something looks wrong
+GET {{api}}/api/health
+
+###############################################################################
+# PowerSync upload path — POST /api/data
+#
+# This is what ApiConnector.uploadData sends after draining the local CRUD
+# queue. Values are raw SQLite: `completed` is 0/1, not true/false, and
+# write-only fields (the user pin) ride along as operation metadata.
+###############################################################################
+
+### PUT — insert a todo (the batch the CRUD queue produces for one insert)
+POST {{proxy}}/api/data
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "batch": [
+    {
+      "op": "PUT",
+      "table": "todos",
+      "id": "{{todoId}}",
+      "data": {
+        "id": "{{todoId}}",
+        "user_id": "{{userId}}",
+        "title": "Todo written through the proxy",
+        "completed": 0,
+        "created_at": "2026-09-11T09:00:00.000Z"
+      }
+    }
+  ]
+}
+
+### PATCH — tick it off (`completed: 1`, the SQLite integer PowerSync sends)
+POST {{proxy}}/api/data
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "batch": [
+    {
+      "op": "PATCH",
+      "table": "todos",
+      "id": "{{todoId}}",
+      "data": { "id": "{{todoId}}", "completed": 1 }
+    }
+  ]
+}
+
+### A batch of several ops — applied in one transaction, all or nothing
+POST {{proxy}}/api/data
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "batch": [
+    {
+      "op": "PUT",
+      "table": "todos",
+      "id": "aaaaaaaa-0000-4000-8000-000000000002",
+      "data": {
+        "id": "aaaaaaaa-0000-4000-8000-000000000002",
+        "user_id": "{{userId}}",
+        "title": "Queued while offline #1",
+        "completed": 0,
+        "created_at": "2026-09-11T09:01:00.000Z"
+      }
+    },
+    {
+      "op": "PUT",
+      "table": "todos",
+      "id": "aaaaaaaa-0000-4000-8000-000000000003",
+      "data": {
+        "id": "aaaaaaaa-0000-4000-8000-000000000003",
+        "user_id": "{{userId}}",
+        "title": "Queued while offline #2",
+        "completed": 0,
+        "created_at": "2026-09-11T09:02:00.000Z"
+      }
+    },
+    {
+      "op": "PATCH",
+      "table": "todos",
+      "id": "aaaaaaaa-0000-4000-8000-000000000002",
+      "data": { "id": "aaaaaaaa-0000-4000-8000-000000000002", "completed": 1 }
+    }
+  ]
+}
+
+### DELETE — remove a todo
+POST {{proxy}}/api/data
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "batch": [
+    {
+      "op": "DELETE",
+      "table": "todos",
+      "id": "aaaaaaaa-0000-4000-8000-000000000003",
+      "data": { "id": "aaaaaaaa-0000-4000-8000-000000000003" }
+    }
+  ]
+}
+
+### PUT a user — admin only, and the plaintext pin travels as metadata
+POST {{proxy}}/api/data
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "batch": [
+    {
+      "op": "PUT",
+      "table": "users",
+      "id": "{{newUserId}}",
+      "data": {
+        "id": "{{newUserId}}",
+        "name": "proxy-tester",
+        "role": "user",
+        "created_at": "2026-09-11T09:03:00.000Z"
+      },
+      "metadata": { "pin": "54321" }
+    }
+  ]
+}
+
+### DELETE that user again
+POST {{proxy}}/api/data
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "batch": [
+    {
+      "op": "DELETE",
+      "table": "users",
+      "id": "{{newUserId}}",
+      "data": { "id": "{{newUserId}}" }
+    }
+  ]
+}
+
+### An op the server rejects — /api/data collapses it into a flat 400 and the
+### PowerSync client retries it forever (the known head-of-line block)
+POST {{proxy}}/api/data
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "batch": [
+    {
+      "op": "PUT",
+      "table": "todos",
+      "id": "aaaaaaaa-0000-4000-8000-000000000009",
+      "data": { "id": "aaaaaaaa-0000-4000-8000-000000000009", "title": "" }
+    }
+  ]
+}
+
+### No token — the proxy forwards it and the API answers 401
+POST {{proxy}}/api/data
+Content-Type: application/json
+
+{
+  "batch": []
+}
+
+###############################################################################
+# The rest of the API, also forwarded
+###############################################################################
+
+### PowerSync credentials (GET — untouched while the default POST-only fault is armed)
+GET {{proxy}}/api/powersync/token
+Authorization: Bearer {{token}}
+
+### List my todos
+GET {{proxy}}/api/todos
+Authorization: Bearer {{token}}
+
+### Create one over REST (the `web` app's write path)
+POST {{proxy}}/api/todos
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "id": "aaaaaaaa-0000-4000-8000-000000000010",
+  "title": "REST todo through the proxy"
+}
+
+### Update it
+PATCH {{proxy}}/api/todos/aaaaaaaa-0000-4000-8000-000000000010
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "completed": true
+}
+
+### Delete it
+DELETE {{proxy}}/api/todos/aaaaaaaa-0000-4000-8000-000000000010
+Authorization: Bearer {{token}}
+
+### List users (admin)
+GET {{proxy}}/api/users
+Authorization: Bearer {{token}}
