@@ -1,4 +1,4 @@
-# poc-electricsql-tanstackdb
+# poc-offline-first
 
 A Bun monorepo POC: a multi-user todo app with a Hono API, a Drizzle/Postgres
 data layer, and **two React frontends that demonstrate two different sync
