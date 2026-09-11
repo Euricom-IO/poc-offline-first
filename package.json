@@ -10,7 +10,7 @@
     "dev3": "bun run --filter '@app/api' dev & bun run --filter '@app/web-powersync' dev",
     "dev:api": "bun run --filter '@app/api' dev",
     "dev:web": "bun run --filter '@app/web' dev",
-    "dev:web2": "bun run --filter '@app/web2' dev",
+    "dev:web-electric": "bun run --filter '@app/web-electric' dev",
     "dev:web-powersync": "bun run --filter '@app/web-powersync' dev",
     "build": "bun run --filter '*' build",
     "db:generate": "bun run --filter '@app/db' generate",
