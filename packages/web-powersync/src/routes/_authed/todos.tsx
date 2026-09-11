@@ -24,22 +24,22 @@ function TodosPage() {
     e.preventDefault();
     const value = title.trim();
     if (!value) return;
-    // Insert uses raw SQLite-compatible values (integer/text); the collection
-    // schema transforms them back into boolean/Date when the row is read.
+    // The collection speaks rich types; the serializer encodes them to the
+    // SQLite integer/text representation on write.
     todoCollection.insert({
       id: crypto.randomUUID(),
       user_id: auth.user?.id ?? '',
       title: value,
-      completed: 0,
-      created_at: new Date().toISOString(),
+      completed: false,
+      created_at: new Date(),
     });
     setTitle('');
   }
 
   function toggle(todo: Todo) {
-    // The update draft holds raw SQLite values, so `completed` is an integer.
+    // The draft holds the same rich types the collection reads out.
     todoCollection.update(todo.id, (draft) => {
-      draft.completed = todo.completed ? 0 : 1;
+      draft.completed = !todo.completed;
     });
   }
 

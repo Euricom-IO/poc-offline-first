@@ -38,8 +38,20 @@ dataRoutes.use('*', authMiddleware);
  */
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
+/**
+ * PowerSync stores rows in SQLite, which has no boolean type, so a CRUD op
+ * carries `completed` as 0/1 rather than as a JSON boolean. The shared services
+ * work on the same shape the REST path parses out of JSON, so decode the SQLite
+ * representation here at the transport boundary (as `extractPin` does for
+ * metadata) rather than teaching the services about SQLite.
+ */
+function decodeTodoData(data: Record<string, unknown>): Record<string, unknown> {
+  if (typeof data.completed !== 'number') return data;
+  return { ...data, completed: data.completed !== 0 };
+}
+
 async function applyTodoOp(tx: Tx, user: AuthUser, entry: UploadEntry): Promise<void> {
-  const data = { ...entry.data, id: entry.id ?? entry.data?.id };
+  const data = decodeTodoData({ ...entry.data, id: entry.id ?? entry.data?.id });
   switch (entry.op) {
     case 'PUT':
       await applyTodoInsert(tx, user, data);

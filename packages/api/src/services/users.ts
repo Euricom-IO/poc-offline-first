@@ -56,6 +56,13 @@ export async function applyUserUpdate(
     patch.pinHash = await Bun.password.hash(payload.pin);
   }
 
+  // As in applyTodoUpdate: an empty patch would make drizzle throw rather than
+  // be the no-op the sync replay paths expect.
+  if (Object.keys(patch).length === 0) {
+    const [current] = await tx.select().from(users).where(eq(users.id, id));
+    return current ?? null;
+  }
+
   const [row] = await tx.update(users).set(patch).where(eq(users.id, id)).returning();
   return row ?? null;
 }

@@ -115,7 +115,7 @@ function CreateUserDialog() {
         id: crypto.randomUUID(),
         name: name.trim(),
         role,
-        created_at: new Date().toISOString(),
+        created_at: new Date(),
       },
       { metadata: { pin } },
     );

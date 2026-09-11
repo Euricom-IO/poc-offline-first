@@ -49,6 +49,17 @@ export async function applyTodoUpdate(
   if (typeof payload.title === 'string') patch.title = payload.title.trim();
   if (typeof payload.completed === 'boolean') patch.completed = payload.completed;
 
+  // A payload with no recognised fields would make drizzle throw "No values to
+  // set", which the sync write paths can only report as a terminal error and
+  // then retry forever. Treat it as an applied no-op instead.
+  if (Object.keys(patch).length === 0) {
+    const [current] = await tx
+      .select()
+      .from(todos)
+      .where(and(eq(todos.id, id), eq(todos.userId, user.id)));
+    return current ?? null;
+  }
+
   const [row] = await tx
     .update(todos)
     .set(patch)
