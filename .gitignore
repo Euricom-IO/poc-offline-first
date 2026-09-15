@@ -11,3 +11,4 @@ coverage/
 .data/
 .data-powersync/
 .playwright-mcp/
+.scratch/
