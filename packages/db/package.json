@@ -9,11 +9,11 @@
     "./types": "./src/types.ts"
   },
   "scripts": {
-    "generate": "drizzle-kit generate",
-    "migrate": "drizzle-kit migrate",
-    "push": "drizzle-kit push",
-    "studio": "drizzle-kit studio",
-    "seed": "bun run src/seed.ts",
+    "generate": "bun --env-file=../../.env x drizzle-kit generate",
+    "migrate": "bun --env-file=../../.env x drizzle-kit migrate",
+    "push": "bun --env-file=../../.env x drizzle-kit push",
+    "studio": "bun --env-file=../../.env x drizzle-kit studio",
+    "seed": "bun --env-file=../../.env run src/seed.ts",
     "build": "tsc --noEmit"
   },
   "dependencies": {

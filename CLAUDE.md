@@ -43,6 +43,27 @@ bun run db:studio
 bun run lint / fmt / check   # Vite+ (`vp`) — NOT a workspace dependency, must be installed globally
 ```
 
+### `.env` and the package scripts
+
+Bun loads `.env` from the **process cwd**, and `bun run --filter` runs each
+package from its own directory — so the repo-root `.env` never reached `@app/api`,
+`@app/db` or `@app/proxy`. Every script that needs it therefore passes
+`--env-file=../../.env` explicitly (a missing file is a no-op, not an error).
+
+This was invisible for months because **every `process.env.X ?? default` in the
+repo defaults to the same value `.env` sets** — `DATABASE_URL`, `JWT_SECRET`,
+`API_PORT` all match, so nothing ever looked broken. The first var whose default
+differed was `POWERSYNC_URL`: the API kept handing browsers
+`http://localhost:8080`, so the PowerSync download stream bypassed the proxy
+entirely and no `/powersync/*` fault could ever match. When adding an env var,
+assume it is NOT reaching the process until you have checked.
+
+`vite.config.ts` has the same trap for values read at **config time**: `envDir`
+only covers `import.meta.env` in the browser bundle. `web-powersync` therefore
+reads the root env with `loadEnv` for its dev-server proxy target;
+`web`/`web-electric` still use `process.env.VITE_API_URL`, which is always
+undefined — latent only because the fallback matches.
+
 There are **no tests** in this repo. Typechecking is the only automated check:
 `bun run build`, or `tsc --noEmit` inside a package. `tsconfig.base.json` is
 strict in ways that fail builds on otherwise harmless edits —
@@ -255,7 +276,12 @@ Things that are load-bearing rather than incidental:
 - The endpoint the browser streams from is the one `GET /api/powersync/token`
   returns, i.e. the API's server-side `POWERSYNC_URL` — it overrides the
   client's `VITE_POWERSYNC_URL`, and the API reads it at **startup**, so
-  changing it in `.env` needs an API restart, not just a hot reload.
+  changing it in `.env` needs an API restart, not just a hot reload. It also
+  needs the API to actually see `.env` at all (see "`.env` and the package
+  scripts"); when it does not, the value silently falls back to
+  `http://localhost:8080` and the download stream goes straight to the service,
+  where no fault can reach it. `GET /api/powersync/token` is the way to check
+  which endpoint browsers are really being given.
 - Unrelated to `specs/proxy.md`, which plans an authenticated Electric shape
   proxy *inside the API*.
 
