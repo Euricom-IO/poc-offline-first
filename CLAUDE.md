@@ -165,6 +165,19 @@ queue; `ApiConnector.uploadData` in `lib/powersync.ts` POSTs a batch to
 - Uploads carry **raw SQLite values**, so `completed` arrives as `0`/`1`, not as
   a JSON boolean. `decodeTodoData` in `routes/data.ts` converts it at the
   transport boundary; the shared services only ever see the REST-shaped payload.
+- **A blocked upload also stops downloads.** PowerSync will not apply a
+  checkpoint while the CRUD queue is non-empty (server state could overwrite
+  un-uploaded local writes), so a failing `/api/data` makes the client go fully
+  stale even though its download stream is connected and healthy. "Break writes
+  only" is therefore not observable from the client — unlike `web-electric`,
+  where reads and writes are genuinely separate channels.
+- `components/SyncStatus.tsx` reports **both** directions for that reason: the
+  CRUD queue depth *and* `db.currentStatus.connected`. A queue-only badge showed
+  `Synced` while the download stream was dead, and showed `Syncing n` rather
+  than an error when the server was unreachable (`navigator.onLine` stays true —
+  it only sees the browser's own network). It escalates to `Not syncing` after a
+  10s grace period, keyed on elapsed downtime rather than `status.connecting`,
+  which flaps on every retry attempt.
 - **There is no dead-lettering on this path.** `/api/data` collapses every
   failure — including `ServiceError`s that would be 4xx elsewhere — into a flat
   `400`, and the client just throws and retries, so a genuinely invalid op
@@ -174,6 +187,15 @@ queue; `ApiConnector.uploadData` in `lib/powersync.ts` POSTs a batch to
 - `enableMultiTabs: false` is deliberate: the default SharedWorker gives all
   tabs one connection in a leader tab, and the TanStack DB diff-trigger
   reactivity then doesn't propagate to follower tabs.
+- **Two tabs cannot be used to test sync.** Same origin plus same profile means
+  the same IndexedDB, so both tabs share one wa-sqlite database *and* one CRUD
+  queue — verified with uploads broken: a row written in tab 1 was already in
+  tab 2's local DB and tab 2's badge showed the same `1 pending`, though tab 2's
+  list did not re-render. A row crossing tabs therefore proves shared storage,
+  not a server round-trip. Multi-client testing needs a second browser profile
+  (private window, separate browser, or a Playwright MCP server with
+  `--isolated`); across real profiles both directions propagate live, inserts
+  and updates alike. See scenario 8 of the proxy README's checklist.
 - `VITE_POWERSYNC_URL` **is** set in `.env.example`, so the default path is real
   bidirectional sync. If you unset it, `initPowerSync` falls back to a POC-only
   bridge: no `db.connect()`, so there is no download stream, and uploads are
@@ -208,7 +230,10 @@ one rule — `offline` (answer 500, never contact the API), `error` (any status)
 `/{status,log,online,reset}` read and clear it. The control routes are also
 mounted on the data port under `/__proxy` for convenience.
 `packages/proxy/http/*.http` drives all of it, as does a dashboard at
-`http://localhost:3101/ui`; the package README has the full surface.
+`http://localhost:3101/ui`; the package README has the full surface, and its
+**Sync fault checklist** is the end-to-end pass over the `web-powersync` path
+(both directions, every mode, expected badge and server state per scenario) —
+run it after touching the sync layer or `SyncStatus.tsx`.
 
 Things that are load-bearing rather than incidental:
 

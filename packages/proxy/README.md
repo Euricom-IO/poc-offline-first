@@ -208,6 +208,192 @@ holds its CRUD queue, but it is an HTTP error rather than a `TypeError`. Only a
 client talking to `:3100` directly — the `.http` files, curl — sees the raw
 connection failure.
 
+## Sync fault checklist
+
+A pass over the whole `web-powersync` path — both directions, every fault mode,
+and what each one should look like in the app. Everything below was run against
+this proxy; the expected results are what it actually did, not what it ought to
+do in theory.
+
+Setup: `bun run dev3`, log in at <http://localhost:5175> (`peter` / `12345`),
+and open the dashboard at <http://localhost:3101/ui> next to it. Ground truth
+for "did the server really get it" is the API, read directly so the proxy is not
+in the way:
+
+```bash
+TOKEN=$(curl -s -X POST localhost:3000/api/auth/login \
+  -H 'content-type: application/json' -d '{"name":"peter","pin":"12345"}' \
+  | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+curl -s localhost:3000/api/todos -H "authorization: Bearer $TOKEN"
+```
+
+Run `curl -X POST localhost:3101/reset` between scenarios: it disarms, brings
+the data plane back and clears the log. The badge vocabulary the app uses is
+`Synced` · `Syncing n` · `Retrying n` · `Reconnecting` · `Not syncing · <age>
+stale` · `Offline`.
+
+### 1. Baseline — nothing armed
+
+Add a todo. `POST /api/data → 200` in the log, followed by
+`GET /powersync/write-checkpoint2.json`; the row is in Postgres; badge stays
+`Synced`. If this fails, nothing below means anything.
+
+### 2. Writes broken, reads untouched
+
+```bash
+curl -X POST localhost:3101/fault -H 'content-type: application/json' \
+  -d '{"mode":"offline","path":"/api/data","methods":["POST"]}'
+```
+
+Add two todos. Both appear instantly (they are local writes), badge goes
+`Syncing 2`, and `POST /api/data → 500` repeats every ~5s. Nothing reaches
+Postgres. `GET /api/powersync/token` keeps returning 200 — that is deliberate,
+and why only `POST` is faulted by default: the client must stay logged in while
+its writes fail.
+
+**Also insert a row from outside the app** (`POST localhost:3000/api/todos`, as
+above) while this is armed. It does *not* appear, even though the download
+stream is connected and healthy: **PowerSync will not apply a checkpoint while
+the CRUD queue is non-empty**, since server state could overwrite local writes
+that have not been uploaded. So a broken upload path stops downloads too — the
+client goes fully stale, which is not true of the `web-electric` path, where the
+two channels are independent.
+
+Recover with `POST /online`: the queue drains in order, the held-back row
+arrives, badge returns to `Synced`.
+
+### 3. Reads broken, writes untouched
+
+```bash
+curl -X POST localhost:3101/fault -H 'content-type: application/json' \
+  -d '{"mode":"offline","path":"/powersync","methods":["POST","GET"]}'
+curl -X POST localhost:3101/cut -H 'content-type: application/json' \
+  -d '{"path":"/powersync"}'
+```
+
+The `/cut` is the whole point — without it the established stream keeps running
+and the fault never bites. After it, `POST /powersync/sync/stream → 500` repeats.
+
+Writes still work: add a todo and it lands in Postgres normally. Rows inserted
+from outside do **not** arrive. The badge shows `Reconnecting` for the first 10s,
+then `Not syncing · <age> stale`, with the upstream error in its tooltip.
+
+That escalation is the fix for a real bug: the badge used to read `Synced`
+throughout, because it only watched the upload queue — the client was silently
+stale with a green light. Re-check it here whenever `SyncStatus.tsx` changes.
+
+`POST /online` reconnects within a few seconds and the missed rows land.
+
+### 4. Poison message — the head-of-line block
+
+```bash
+curl -X POST localhost:3101/fault -H 'content-type: application/json' \
+  -d '{"mode":"error","status":400,"path":"/api/data","methods":["POST"]}'
+```
+
+Add a todo, then a second one. Badge goes `Retrying 1` then `Retrying 2` (the
+amber variant, meaning the upload is erroring rather than merely in flight), and
+`POST /api/data → 400` repeats forever. Neither row reaches Postgres: the second
+is stuck behind the first.
+
+This is the documented gap — `/api/data` collapses every failure into a flat
+`400` and the client just throws and retries, so **there is no dead-lettering on
+this path** and a genuinely invalid op blocks the queue permanently. Contrast
+`web-electric`, which dead-letters 4xx. Clearing the fault drains both in order,
+which confirms the ops were never dropped, only blocked.
+
+### 5. Slow and hanging
+
+```bash
+curl -X POST localhost:3101/fault -H 'content-type: application/json' \
+  -d '{"mode":"delay","delaySeconds":5,"path":"/api/data"}'   # writes land, late
+curl -X POST localhost:3101/fault -H 'content-type: application/json' \
+  -d '{"mode":"timeout","path":"/api/data"}'                  # never answered
+```
+
+Under `timeout` the request hangs until the client gives up, and the control
+plane stays usable throughout — `/__proxy/*` is registered before the catch-all
+and is never faulted, so a fault is always clearable even while a request hangs.
+
+### 6. `disconnect` — one dropped socket
+
+```bash
+curl -X POST localhost:3101/fault -H 'content-type: application/json' \
+  -d '{"mode":"disconnect","path":"/api/health","methods":["POST","GET"]}'
+curl localhost:3100/api/health    # curl: (56) Recv failure: Connection reset by peer
+curl localhost:5175/api/health    # 502 — vite answers for the socket it lost
+```
+
+Both are correct; they are different vantage points. See
+[`disconnect` vs `down`](#disconnect-vs-down).
+
+### 7. `down` — no listener at all
+
+```bash
+curl -X POST localhost:3101/down
+curl localhost:3100/api/health    # curl: (7) Failed to connect
+curl localhost:5175/api/health    # 502
+curl localhost:3101/status        # still answers
+```
+
+Write a todo while down: it stays local, and the badge shows
+`Not syncing · <age> stale · 1 pending` — **not** `Offline`, because
+`navigator.onLine` is still `true`. An unreachable server is not a browser
+offline event, and the badge has to say so itself; it previously showed a
+reassuring `Syncing 1` here. `POST /up` restores, and the queue drains.
+
+### 8. Two clients — does it actually round-trip?
+
+Everything above verifies one client against the server. This is the one that
+checks a write reaches *another* client, and it needs a second browser with its
+own storage.
+
+**Two tabs of the same browser do not work.** Same origin and same profile means
+the same IndexedDB, so both tabs share one wa-sqlite database and one CRUD
+queue — a row "appearing" in the second tab proves only shared local storage,
+not sync. Confirmed the hard way: with uploads broken, a row written in tab 1
+was already present in tab 2's local DB, and tab 2's badge showed the same
+`1 pending`. (Its list did not re-render, but that is a reactivity detail, not
+isolation.) Use a second **profile**: a private window, a separate browser, or a
+second Playwright MCP server started with `--isolated`.
+
+Read each client's own database directly rather than trusting the rendered list:
+
+```js
+await db.getAll("SELECT title, completed FROM todos WHERE title LIKE 'ISO%'")
+await db.getUploadQueueStats()   // whose queue is this row sitting in?
+```
+
+1. Log both in. Both should reach `Synced` with the same row count — B syncing
+   down from scratch is itself a download-path test.
+2. Break uploads (`{"mode":"offline","path":"/api/data"}`) and write in A.
+   **B's local DB must not contain it and B's `pendingUploads` must be 0.** This
+   is the assertion that fails with two tabs, so it is the one that proves the
+   clients are really separate.
+3. Clear the fault. The row should land in B's local DB *and* render without a
+   reload.
+4. Write in B and confirm it appears in A — the reverse direction is a different
+   code path on the way back down.
+5. Toggle a todo's completion in A and confirm B's checkbox follows; updates go
+   through the schema validation that inserts skip (see the two-zod-schema note
+   in CLAUDE.md).
+
+The dashboard shows the two clients apart: `write-checkpoint2.json?client_id=…`
+carries a different id per client, and there is one open `/powersync/sync/stream`
+each. If both requests share a `client_id`, they are the same client and this
+scenario is not testing what it looks like.
+
+Note the proxy's fault state is **global** — rules scope by path, method and
+count, never by client, so both clients always see the same armed fault. You can
+break sync for everyone, not for one client.
+
+### 9. Genuinely offline
+
+Toggle the browser's own offline mode (DevTools → Network → Offline) rather than
+using the proxy. This is the one case `navigator.onLine` does see, and the badge
+should read `Offline · n pending`. Worth doing last, as a control: it proves the
+states above are reporting a *server* problem rather than a network one.
+
 ## `.http` files
 
 [`http/`](http) drives all of this from the editor. Written for the VS Code
