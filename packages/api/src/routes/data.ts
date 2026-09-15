@@ -44,10 +44,26 @@ type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
  * work on the same shape the REST path parses out of JSON, so decode the SQLite
  * representation here at the transport boundary (as `extractPin` does for
  * metadata) rather than teaching the services about SQLite.
+ *
+ * The op also carries raw *column* names. `title` and `completed` happen to be
+ * spelled the same either way, but `due_date` is the first field where the
+ * PowerSync payload and the REST DTO genuinely differ, so rename it here too —
+ * the services only ever see the REST-shaped `dueDate`.
+ *
+ * Note `'due_date' in data` rather than a truthiness check: an explicit null
+ * clears the column and must survive, while an absent key must stay absent so
+ * applyTodoUpdate leaves the column alone.
  */
 function decodeTodoData(data: Record<string, unknown>): Record<string, unknown> {
-  if (typeof data.completed !== 'number') return data;
-  return { ...data, completed: data.completed !== 0 };
+  const decoded: Record<string, unknown> = { ...data };
+  if (typeof decoded.completed === 'number') {
+    decoded.completed = decoded.completed !== 0;
+  }
+  if ('due_date' in decoded) {
+    decoded.dueDate = decoded.due_date;
+    delete decoded.due_date;
+  }
+  return decoded;
 }
 
 async function applyTodoOp(tx: Tx, user: AuthUser, entry: UploadEntry): Promise<void> {

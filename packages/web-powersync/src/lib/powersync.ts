@@ -43,6 +43,8 @@ export const APP_SCHEMA = new Schema({
       user_id: column.text,
       title: column.text,
       completed: column.integer,
+      // Nullable ISO text, like created_at — SQLite has no timestamp type.
+      due_date: column.text,
       created_at: column.text,
     },
     { trackMetadata: true },

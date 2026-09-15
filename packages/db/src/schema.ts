@@ -17,6 +17,9 @@ export const todos = pgTable('todos', {
     .references(() => users.id, { onDelete: 'cascade' }),
   title: text('title').notNull(),
   completed: boolean('completed').notNull().default(false),
+  // Nullable: a todo without a deadline is the normal case, and the sync paths
+  // need "no due date" and "due date cleared" to be the same value.
+  dueDate: timestamp('due_date', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 

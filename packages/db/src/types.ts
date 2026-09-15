@@ -15,6 +15,8 @@ export interface Todo {
   userId: string;
   title: string;
   completed: boolean;
+  /** ISO timestamp, or null when the todo has no deadline. */
+  dueDate: string | null;
   createdAt: string;
 }
 

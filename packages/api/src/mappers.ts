@@ -13,5 +13,6 @@ export const toTodo = (r: TodoRow): Todo => ({
   userId: r.userId,
   title: r.title,
   completed: r.completed,
+  dueDate: r.dueDate?.toISOString() ?? null,
   createdAt: r.createdAt.toISOString(),
 });

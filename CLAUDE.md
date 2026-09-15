@@ -131,6 +131,18 @@ values (`boolean`/`Date`), which takes **two zod schemas per collection**:
   to rows arriving from the sync stream.
 - `serializer` — rich types → SQLite values on write.
 
+**The serializer's output must be byte-identical to what the replication stream
+stores**, because PowerSync's update trigger diffs the stored *text* to decide
+which columns a PATCH carries. Timestamps arrive with **microsecond** precision
+(`2026-09-19T22:00:00.000000Z`) while `Date.toISOString()` emits milliseconds, so
+a `toISOString()` serializer makes that column differ on every write and it is
+re-sent even when untouched. For `due_date` that silently clobbers another
+client's concurrent edit on an unrelated checkbox toggle — `toStreamIsoText` in
+`collections/todos.ts` pads to six digits to prevent it. `created_at` still has
+this problem and is only harmless because no service reads it from an update
+payload. Nothing typechecks this: verify by making a one-field change and reading
+the batch `/api/data` logs.
+
 ### `web-electric` write path
 
 Reads and writes are on separate channels. `lib/eventStore.ts` (Dexie) persists
@@ -165,6 +177,12 @@ queue; `ApiConnector.uploadData` in `lib/powersync.ts` POSTs a batch to
 - Uploads carry **raw SQLite values**, so `completed` arrives as `0`/`1`, not as
   a JSON boolean. `decodeTodoData` in `routes/data.ts` converts it at the
   transport boundary; the shared services only ever see the REST-shaped payload.
+  They also carry raw **column** names. `title`/`completed` are spelled the same
+  either way, but `due_date` is the first field where the PowerSync payload and
+  the REST DTO differ, so `decodeTodoData` renames it to `dueDate` too. Anything
+  multi-word added later needs the same treatment — and note it tests
+  `'due_date' in data`, not truthiness, because an explicit `null` clears the
+  column while an absent key must leave it alone.
 - **A blocked upload also stops downloads.** PowerSync will not apply a
   checkpoint while the CRUD queue is non-empty (server state could overwrite
   un-uploaded local writes), so a failing `/api/data` makes the client go fully

@@ -24,7 +24,7 @@ todoRoutes.get('/', async (c) => {
 
 todoRoutes.post('/', async (c) => {
   const user = c.get('user');
-  const body = await c.req.json<{ id?: string; title?: string }>();
+  const body = await c.req.json<{ id?: string; title?: string; dueDate?: string | null }>();
   try {
     // Wrap the write in a transaction so we can hand back its txid for Electric
     // sync matching. The mutation itself lives in the shared todo service.
@@ -43,7 +43,11 @@ todoRoutes.post('/', async (c) => {
 todoRoutes.patch('/:id', async (c) => {
   const user = c.get('user');
   const id = c.req.param('id');
-  const body = await c.req.json<{ title?: string; completed?: boolean }>();
+  const body = await c.req.json<{
+    title?: string;
+    completed?: boolean;
+    dueDate?: string | null;
+  }>();
   const { row, txid } = await db.transaction(async (tx) => {
     const txid = await getTxid(tx);
     const row = await applyTodoUpdate(tx, user, { id, ...body });
