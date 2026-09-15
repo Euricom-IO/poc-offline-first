@@ -87,6 +87,17 @@ export const db = new PowerSyncDatabase({
 const POWERSYNC_URL = import.meta.env.VITE_POWERSYNC_URL as string | undefined;
 
 /**
+ * Whether a download stream is expected at all.
+ *
+ * With no service configured, initPowerSync() runs the POC bridge below and
+ * never calls `db.connect()`, so `db.currentStatus.connected` stays false for
+ * the life of the page. The sync badge needs that distinction: "not connected
+ * because there is nothing to connect to" must not be reported as a broken
+ * connection.
+ */
+export const DOWNLOAD_STREAM_ENABLED = Boolean(POWERSYNC_URL);
+
+/**
  * Transport for the download stream.
  *
  * The SDK's default is a WebSocket (RSocket framing over `ws://…/sync/stream`).
